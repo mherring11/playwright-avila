@@ -4,6 +4,7 @@ const path = require("path");
 const { PNG } = require("pngjs");
 const sharp = require("sharp");
 const config = require("../config.js");
+const axios = require("axios");
 
 let pixelmatch;
 let chalk;
@@ -283,6 +284,195 @@ test.describe("Visual Comparison Tests", () => {
     await context.close();
   });
 
+  test("Verify broken image links automatically on staging pages from config.js", async ({
+    page,
+  }) => {
+    const stagingUrls = config.staging.urls.map(
+      (url) => `${config.staging.baseUrl}${url}`
+    );
+
+    for (const url of stagingUrls) {
+      console.log(chalk.blue(`Navigating to: ${url}`));
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      console.log(chalk.green(`Page loaded successfully: ${url}`));
+
+      console.log(chalk.blue("Finding all image elements on the page..."));
+      const images = await page.locator("img");
+      const imageCount = await images.count();
+      console.log(chalk.green(`Found ${imageCount} images on the page.`));
+
+      let brokenImages = 0;
+
+      for (let i = 0; i < imageCount; i++) {
+        let imageUrl = await images.nth(i).getAttribute("src");
+
+        if (!imageUrl) {
+          console.log(
+            chalk.yellow(`Image ${i + 1} does not have a valid src attribute.`)
+          );
+          brokenImages++;
+          continue;
+        }
+
+        // Handle relative and protocol-relative URLs
+        if (!imageUrl.startsWith("http") && !imageUrl.startsWith("//")) {
+          imageUrl = new URL(imageUrl, url).toString();
+        } else if (imageUrl.startsWith("//")) {
+          imageUrl = `https:${imageUrl}`;
+        }
+
+        // Exclude known tracking pixels or problematic URLs
+        if (
+          imageUrl.includes("bat.bing.com") ||
+          imageUrl.includes("tracking")
+        ) {
+          console.log(
+            chalk.yellow(
+              `Image ${i + 1} is a tracking pixel or excluded URL: ${imageUrl}`
+            )
+          );
+          continue;
+        }
+
+        try {
+          console.log(chalk.blue(`Checking image ${i + 1}: ${imageUrl}`));
+          const response = await axios.get(imageUrl);
+
+          if (response.status !== 200) {
+            console.log(
+              chalk.red(
+                `Image ${i + 1} failed to load. Status Code: ${response.status}`
+              )
+            );
+            brokenImages++;
+          } else {
+            console.log(chalk.green(`Image ${i + 1} loaded successfully.`));
+          }
+        } catch (error) {
+          console.log(
+            chalk.red(`Image ${i + 1} failed to load. Error: ${error.message}`)
+          );
+          brokenImages++;
+        }
+      }
+
+      if (brokenImages > 0) {
+        console.log(
+          chalk.red(
+            `Test failed for ${url}. Found ${brokenImages} broken images on the page.`
+          )
+        );
+      } else {
+        console.log(
+          chalk.green(
+            `Test passed for ${url}. No broken images found on the page.`
+          )
+        );
+      }
+    }
+  });
+
+  test("Fill out the form one field at a time and submit (Staging Only)", async ({ browser }) => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+  
+    try {
+      // Navigate to the staging form page
+      const formPageUrl = `${config.staging.baseUrl}${config.staging.urls[0]}`;
+      console.log(chalk.blue(`Navigating to the staging form page: ${formPageUrl}`));
+  
+      await page.goto(formPageUrl, { waitUntil: "domcontentloaded" });
+      console.log(chalk.green("Page loaded successfully on staging."));
+  
+      // Click the "Request Info" button to display the form
+      console.log(chalk.blue("Clicking 'Request Info' button..."));
+      await page.click("button.request-info-popup");
+      console.log(chalk.green("Form popup displayed successfully."));
+  
+      console.log(chalk.blue("Blocking unnecessary resources on staging..."));
+      await page.route("**/*", (route) => {
+        const url = route.request().url();
+        if (
+          url.endsWith(".png") ||
+          url.endsWith(".jpg") ||
+          url.endsWith(".css") ||
+          url.endsWith(".js")
+        ) {
+          route.abort();
+        } else {
+          route.continue();
+        }
+      });
+      console.log(chalk.green("Unnecessary resources blocked."));
+  
+      // Fill out the form fields
+      console.log(chalk.blue("Filling out the form..."));
+      await page.selectOption("#input_6_1", { value: "AVILA-M-MBAFIN" }); // Select "MBA with a concentration in Finance"
+      const firstName = `John${Date.now()}`;
+      await page.fill("#input_6_2", firstName); // First Name
+      console.log(chalk.green(`Filled 'First Name' with: ${firstName}`));
+      await page.fill("#input_6_3", "Doe"); // Last Name
+      console.log(chalk.green("Filled 'Last Name' with: Doe"));
+      const email = `johndoe${Date.now()}@example.com`;
+      await page.fill("#input_6_6", email); // Email
+      console.log(chalk.green(`Filled 'Email' with: ${email}`));
+      await page.fill("#input_6_4", "5551234567"); // Phone
+      console.log(chalk.green("Filled 'Phone' with: 5551234567"));
+      await page.fill("#input_6_5", "12345"); // ZIP Code
+      console.log(chalk.green("Filled 'ZIP Code' with: 12345"));
+      await page.selectOption("#input_6_7", { value: "Email" }); // Select "How did you hear about us?" as "Email"
+      console.log(chalk.green("Filled 'How did you hear about us?' with: Email"));
+  
+      // Submit the form
+      console.log(chalk.blue("Submitting the form..."));
+      await Promise.all([
+        page.waitForNavigation({ waitUntil: "domcontentloaded" }),
+        page.click("#gform_submit_button_6"),
+      ]);
+      console.log(chalk.green("Form submitted successfully on staging."));
+  
+      // Wait for confirmation page
+      const confirmationUrl = page.url();
+      console.log(chalk.blue(`Current URL after submission: ${confirmationUrl}`));
+      if (!confirmationUrl.includes("/confirmation/")) {
+        console.error(chalk.red("Did not navigate to the expected confirmation URL."));
+        throw new Error("Confirmation URL mismatch.");
+      }
+  
+      // Verify confirmation message
+      console.log(chalk.blue("Waiting for confirmation message..."));
+      await page.waitForSelector(".elementor-widget-container h1.header2", {
+        timeout: 20000,
+      });
+      const confirmationText = await page.textContent(
+        ".elementor-widget-container h1.header2"
+      );
+
+      const normalizedText = confirmationText.trim().replace(/\s+/g, " ").toLowerCase();
+      const expectedText = "Thanks for your submission!".toLowerCase();
+  
+      if (normalizedText === expectedText) {
+        console.log(
+          chalk.green(
+            "Form submitted successfully and confirmation message displayed on staging."
+          )
+        );
+      } else {
+        console.error(
+          chalk.red(
+            `Confirmation message mismatch. Found: "${confirmationText.trim()}"`
+          )
+        );
+        throw new Error("Confirmation message mismatch.");
+      }
+    } catch (error) {
+      console.error(chalk.red(`Error during test: ${error.message}`));
+    } finally {
+      await context.close();
+    }
+  });
+  
+
   test("Click Apply Now, fill out the form, and submit", async ({ page }) => {
     const homePageUrl = "https://live-web-online-avila.pantheonsite.io/";
     const formPageUrl = "https://live-web-online-avila.pantheonsite.io/apply/";
@@ -298,22 +488,24 @@ test.describe("Visual Comparison Tests", () => {
       submitButton: "#gform_submit_button_1",
       confirmationMessage: ".elementor-element-375b1cc6 h1.header2.mb",
     };
-  
+
     try {
       // Navigate to the homepage
       console.log(chalk.blue(`Navigating to the home page: ${homePageUrl}`));
       await page.goto(homePageUrl, { waitUntil: "domcontentloaded" });
       console.log(chalk.green("Homepage loaded successfully."));
-  
+
       // Click on the "Apply Now" button
       console.log(chalk.blue("Clicking on the 'Apply Now' button..."));
       await page.click(formSelectors.applyNowButton);
-  
+
       // Wait for the form page to load
-      console.log(chalk.blue(`Waiting for navigation to the form page: ${formPageUrl}`));
+      console.log(
+        chalk.blue(`Waiting for navigation to the form page: ${formPageUrl}`)
+      );
       await page.waitForURL(formPageUrl, { timeout: 10000 });
       console.log(chalk.green("Navigated to the Apply Now form page."));
-  
+
       // Fill out the form fields
       const testData = {
         program: "AVILA-M-MBAFIN", // Example program value: MBA with a concentration in Finance
@@ -324,96 +516,129 @@ test.describe("Visual Comparison Tests", () => {
         zipCode: "67890",
         deliveryMethod: "Online",
       };
-  
+
       console.log(chalk.blue("Filling out the Apply Now form fields..."));
-      await page.selectOption(formSelectors.programOfInterest, { value: testData.program });
+      await page.selectOption(formSelectors.programOfInterest, {
+        value: testData.program,
+      });
       console.log(chalk.green(`Selected program: ${testData.program}`));
-  
+
       await page.fill(formSelectors.firstName, testData.firstName);
       console.log(chalk.green(`Filled First Name: ${testData.firstName}`));
-  
+
       await page.fill(formSelectors.lastName, testData.lastName);
       console.log(chalk.green(`Filled Last Name: ${testData.lastName}`));
-  
+
       await page.fill(formSelectors.email, testData.email);
       console.log(chalk.green(`Filled Email: ${testData.email}`));
-  
+
       await page.fill(formSelectors.phone, testData.phone);
       console.log(chalk.green(`Filled Phone: ${testData.phone}`));
-  
+
       await page.fill(formSelectors.zipCode, testData.zipCode);
       console.log(chalk.green(`Filled ZIP Code: ${testData.zipCode}`));
-  
-      await page.selectOption(formSelectors.deliveryMethod, { value: testData.deliveryMethod });
-      console.log(chalk.green(`Selected Delivery Method: ${testData.deliveryMethod}`));
-  
+
+      await page.selectOption(formSelectors.deliveryMethod, {
+        value: testData.deliveryMethod,
+      });
+      console.log(
+        chalk.green(`Selected Delivery Method: ${testData.deliveryMethod}`)
+      );
+
       console.log(chalk.green("Form fields filled successfully."));
-  
+
       // Submit the form and wait for navigation to the confirmation page
       console.log(chalk.blue("Submitting the Apply Now form..."));
       await Promise.all([
-        page.waitForSelector(formSelectors.confirmationMessage, { timeout: 30000 }),
+        page.waitForSelector(formSelectors.confirmationMessage, {
+          timeout: 30000,
+        }),
         page.click(formSelectors.submitButton),
       ]);
       console.log(chalk.green("Form submitted successfully."));
-  
+
       // Wait for the confirmation message
       console.log(chalk.blue("Verifying confirmation message..."));
-      const confirmationText = await page.textContent(formSelectors.confirmationMessage);
-  
+      const confirmationText = await page.textContent(
+        formSelectors.confirmationMessage
+      );
+
       // Verify the confirmation message
-      console.log(chalk.blue(`Confirmation message found: "${confirmationText.trim()}"`));
+      console.log(
+        chalk.blue(`Confirmation message found: "${confirmationText.trim()}"`)
+      );
       if (
         confirmationText.trim() ===
         "Great! Now, take the next step to complete your application."
       ) {
-        console.log(chalk.green("Confirmation message matches expected value."));
+        console.log(
+          chalk.green("Confirmation message matches expected value.")
+        );
       } else {
-        console.log(chalk.red("Confirmation message text did not match the expected value."));
+        console.log(
+          chalk.red(
+            "Confirmation message text did not match the expected value."
+          )
+        );
       }
     } catch (error) {
       console.error(chalk.red(`Test failed: ${error.message}`));
     }
   });
-  
-  test("Verify Online Programs and Getting Started Menus - Avila", async ({ page }) => {
-    const verifyMenu = async (menuName, menuSelector, submenuSelector, linksSelector) => {
+
+  test("Verify Online Programs and Getting Started Menus - Avila", async ({
+    page,
+  }) => {
+    const verifyMenu = async (
+      menuName,
+      menuSelector,
+      submenuSelector,
+      linksSelector
+    ) => {
       console.log(chalk.blue(`Locating the '${menuName}' menu...`));
-  
+
       // Locate the menu element
       const menuElement = await page.locator(menuSelector);
       if (!(await menuElement.isVisible())) {
         throw new Error(`The '${menuName}' menu is not visible.`);
       }
       console.log(chalk.green(`The '${menuName}' menu is visible.`));
-  
+
       // Hover over the menu to display submenus
       console.log(chalk.blue(`Hovering over the '${menuName}' menu...`));
       await menuElement.hover();
-  
+
       // Locate submenus
       const submenus = await page.locator(submenuSelector);
       const submenuCount = await submenus.count();
       if (submenuCount === 0) {
         throw new Error(`No submenus found for '${menuName}' menu.`);
       }
-      console.log(chalk.green(`Found ${submenuCount} submenus in the '${menuName}' menu.`));
-  
+      console.log(
+        chalk.green(`Found ${submenuCount} submenus in the '${menuName}' menu.`)
+      );
+
       // Locate links in the submenus
       const links = await page.locator(linksSelector);
       const linkCount = await links.count();
       if (linkCount === 0) {
         throw new Error(`No links found in the '${menuName}' menu.`);
       }
-      console.log(chalk.green(`Found ${linkCount} links in the '${menuName}' menu.`));
-  
+      console.log(
+        chalk.green(`Found ${linkCount} links in the '${menuName}' menu.`)
+      );
+
       // Verify each link
       let invalidLinks = 0;
       for (let i = 0; i < linkCount; i++) {
         const linkText = await links.nth(i).textContent();
         const linkHref = await links.nth(i).getAttribute("href");
-        console.log(chalk.blue(`Checking link ${i + 1} in '${menuName}' menu: ${linkText}`));
-  
+        console.log(
+          chalk.blue(
+            `Checking link ${i + 1} in '${menuName}' menu: ${linkText}`
+          )
+        );
+
         if (!linkHref || linkHref.trim() === "") {
           console.log(
             chalk.yellow(
@@ -429,13 +654,13 @@ test.describe("Visual Comparison Tests", () => {
           );
         }
       }
-  
+
       console.log(
         chalk.green(
           `All checks complete for '${menuName}' menu. Found ${invalidLinks} invalid links.`
         )
       );
-  
+
       if (invalidLinks > 0) {
         console.log(
           chalk.yellow(
@@ -443,15 +668,17 @@ test.describe("Visual Comparison Tests", () => {
           )
         );
       } else {
-        console.log(chalk.green(`All links in the '${menuName}' menu are valid.`));
+        console.log(
+          chalk.green(`All links in the '${menuName}' menu are valid.`)
+        );
       }
     };
-  
+
     const homePageUrl = "https://live-web-online-avila.pantheonsite.io/";
     console.log(chalk.blue("Navigating to the Avila homepage..."));
     await page.goto(homePageUrl, { waitUntil: "domcontentloaded" });
     console.log(chalk.green("Homepage loaded successfully."));
-  
+
     // Verify the "Online Programs" menu
     await verifyMenu(
       "Online Programs",
@@ -459,7 +686,7 @@ test.describe("Visual Comparison Tests", () => {
       "#mega-menu-item-7306 ul.mega-sub-menu",
       "#mega-menu-item-7306 ul.mega-sub-menu a.mega-menu-link"
     );
-  
+
     // Verify the "Getting Started" menu
     await verifyMenu(
       "Getting Started",
